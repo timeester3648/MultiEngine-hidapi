@@ -27,6 +27,8 @@
 #ifndef HIDAPI_H__
 #define HIDAPI_H__
 
+#define HID_API_NO_EXPORT_DEFINE
+
 #include <wchar.h>
 
 /* #480: this is to be refactored properly for v1.0 */
@@ -684,6 +686,25 @@ extern "C" {
 		*/
 		HID_API_EXPORT const char* HID_API_CALL hid_version_str(void);
 
+		////////////////////////////////////////////////////////////////////////////////
+		///                          MultiEngine Extension                           ///
+		////////////////////////////////////////////////////////////////////////////////
+				
+		typedef struct hidapi_allocators {
+			void* (*malloc_fn)(size_t size);
+			void* (*calloc_fn)(size_t num, size_t size);
+			void  (*free_fn)(void* ptr);
+		} hidapi_allocators;
+
+		HID_API_EXPORT void HID_API_CALL hid_setup_allocators(const hidapi_allocators* allocators);
+
+		typedef struct hidapi_error_printer {
+			void (*print_werror_fn)(const wchar_t* msg);
+		} hidapi_error_printer;
+
+		HID_API_EXPORT void HID_API_CALL hid_setup_error_printer(const hidapi_error_printer* printer);
+
+		HID_API_EXPORT 
 #ifdef __cplusplus
 }
 #endif

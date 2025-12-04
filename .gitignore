@@ -30,3 +30,9 @@ CMakeLists.txt.user
 
 # doxgen output
 doxygen/html/
+
+# exclude project files
+**.sln
+**.vcxproj
+**.vcxproj.user
+**.vcxproj.filters

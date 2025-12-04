@@ -84,6 +84,23 @@ static struct hid_api_version api_version = {
 	.patch = HID_API_VERSION_PATCH
 };
 
+// Note: needed to use engine's allocators
+static void* default_malloc(size_t size) { return malloc(size); }
+static void* default_calloc(size_t n, size_t s) { return calloc(n, s); }
+static void  default_free(void* ptr) { free(ptr); }
+
+static struct hidapi_allocators api_allocators = {
+	.malloc_fn = default_malloc,
+	.calloc_fn = default_calloc,
+	.free_fn = default_free
+};
+
+// Note: to make sure devices can be opened and used on separate threads
+//		 as devices do not use global state, aside from the global error
+static struct hidapi_error_printer api_error_printer = {
+	.print_werror_fn = NULL
+};
+
 #ifndef HIDAPI_USE_DDK
 /* Since we're not building with the DDK, and the HID header
    files aren't part of the Windows SDK, we define what we need ourselves.
@@ -200,7 +217,7 @@ struct hid_device_ {
 
 static hid_device *new_hid_device()
 {
-	hid_device *dev = (hid_device*) calloc(1, sizeof(hid_device));
+	hid_device *dev = (hid_device*) api_allocators.calloc_fn(1, sizeof(hid_device));
 
 	if (dev == NULL) {
 		return NULL;
@@ -232,20 +249,20 @@ static void free_hid_device(hid_device *dev)
 	CloseHandle(dev->ol.hEvent);
 	CloseHandle(dev->write_ol.hEvent);
 	CloseHandle(dev->device_handle);
-	free(dev->last_error_str);
-	free(dev->last_read_error_str);
+	api_allocators.free_fn(dev->last_error_str);
+	api_allocators.free_fn(dev->last_read_error_str);
 	dev->last_error_str = NULL;
 	dev->last_read_error_str = NULL;
-	free(dev->write_buf);
-	free(dev->feature_buf);
-	free(dev->read_buf);
+	api_allocators.free_fn(dev->write_buf);
+	api_allocators.free_fn(dev->feature_buf);
+	api_allocators.free_fn(dev->read_buf);
 	hid_free_enumeration(dev->device_info);
-	free(dev);
+	api_allocators.free_fn(dev);
 }
 
 static void register_winapi_error_to_buffer(wchar_t **error_buffer, const WCHAR *op)
 {
-	free(*error_buffer);
+	api_allocators.free_fn(*error_buffer);
 	*error_buffer = NULL;
 
 	/* Only clear out error messages if NULL is passed into op */
@@ -275,7 +292,7 @@ static void register_winapi_error_to_buffer(wchar_t **error_buffer, const WCHAR 
 		+ system_err_len
 		;
 
-	*error_buffer = (WCHAR *)calloc(msg_len + 1, sizeof (WCHAR));
+	*error_buffer = (WCHAR *)api_allocators.calloc_fn(msg_len + 1, sizeof (WCHAR));
 	WCHAR *msg = *error_buffer;
 
 	if (!msg)
@@ -305,12 +322,30 @@ static void register_winapi_error_to_buffer(wchar_t **error_buffer, const WCHAR 
 #endif
 /* A bug in GCC/mingw gives:
  * error: array subscript 0 is outside array bounds of 'wchar_t *[0]' {aka 'short unsigned int *[]'} [-Werror=array-bounds]
- * |         free(*error_buffer);
+ * |         api_allocators.free_fn(*error_buffer);
  * Which doesn't make sense in this context. */
+
+static wchar_t* hidapi_wcsdup(const wchar_t* src) {
+	if (!src)
+		return NULL;
+
+	size_t len = wcslen(src) + 1;          // number of wchar_t's including NUL
+	size_t bytes = len * sizeof(wchar_t);
+
+	wchar_t* dst = (wchar_t*) api_allocators.malloc_fn(bytes);
+	if (!dst)
+		return NULL;
+
+	// copy characters including terminator
+	for (size_t i = 0; i < len; i++)
+		dst[i] = src[i];
+
+	return dst;
+}
 
 static void register_string_error_to_buffer(wchar_t **error_buffer, const WCHAR *string_error)
 {
-	free(*error_buffer);
+	api_allocators.free_fn(*error_buffer);
 	*error_buffer = NULL;
 
 	if (string_error) {
@@ -336,12 +371,21 @@ static wchar_t *last_global_error_str = NULL;
 
 static void register_global_winapi_error(const WCHAR *op)
 {
-	register_winapi_error_to_buffer(&last_global_error_str, op);
+	wchar_t* local_error = NULL;
+	register_winapi_error_to_buffer(&local_error, op);
+	if (api_error_printer.print_werror_fn != NULL && local_error != NULL) {
+		api_error_printer.print_werror_fn(local_error);
+	}
+
+	api_allocators.free_fn(local_error);
 }
 
 static void register_global_error(const WCHAR *string_error)
 {
-	register_string_error_to_buffer(&last_global_error_str, string_error);
+	if (api_error_printer.print_werror_fn != NULL) {
+		api_error_printer.print_werror_fn(string_error);
+	}
+	//register_string_error_to_buffer(&last_global_error_str, string_error);
 }
 
 static HANDLE open_device(const wchar_t *path, BOOL open_rw)
@@ -369,6 +413,16 @@ HID_API_EXPORT const struct hid_api_version* HID_API_CALL hid_version(void)
 HID_API_EXPORT const char* HID_API_CALL hid_version_str(void)
 {
 	return HID_API_VERSION_STR;
+}
+
+HID_API_EXPORT void hid_setup_allocators(const hidapi_allocators* allocators) 
+{
+	memcpy(&api_allocators, allocators, sizeof(hidapi_allocators));
+}
+
+HID_API_EXPORT void hid_setup_error_printer(const hidapi_error_printer* printer) 
+{
+	memcpy(&api_error_printer, printer, sizeof(hidapi_error_printer));
 }
 
 int HID_API_EXPORT hid_init(void)
@@ -407,10 +461,10 @@ static void* hid_internal_get_devnode_property(DEVINST dev_node, const DEVPROPKE
 	if (cr != CR_BUFFER_SMALL || property_type != expected_property_type)
 		return NULL;
 
-	property_value = (PBYTE)calloc(len, sizeof(BYTE));
+	property_value = (PBYTE)api_allocators.calloc_fn(len, sizeof(BYTE));
 	cr = CM_Get_DevNode_PropertyW(dev_node, property_key, &property_type, property_value, &len, 0);
 	if (cr != CR_SUCCESS) {
-		free(property_value);
+		api_allocators.free_fn(property_value);
 		return NULL;
 	}
 
@@ -428,10 +482,10 @@ static void* hid_internal_get_device_interface_property(const wchar_t* interface
 	if (cr != CR_BUFFER_SMALL || property_type != expected_property_type)
 		return NULL;
 
-	property_value = (PBYTE)calloc(len, sizeof(BYTE));
+	property_value = (PBYTE)api_allocators.calloc_fn(len, sizeof(BYTE));
 	cr = CM_Get_Device_Interface_PropertyW(interface_path, property_key, &property_type, property_value, &len, 0);
 	if (cr != CR_SUCCESS) {
-		free(property_value);
+		api_allocators.free_fn(property_value);
 		return NULL;
 	}
 
@@ -515,7 +569,7 @@ static void hid_internal_get_usb_info(struct hid_device_info* dev, DEVINST dev_n
 	if (wcslen(dev->manufacturer_string) == 0) {
 		wchar_t* manufacturer_string = (wchar_t *)hid_internal_get_devnode_property(dev_node, &DEVPKEY_Device_Manufacturer, DEVPROP_TYPE_STRING);
 		if (manufacturer_string) {
-			free(dev->manufacturer_string);
+			api_allocators.free_fn(dev->manufacturer_string);
 			dev->manufacturer_string = manufacturer_string;
 		}
 	}
@@ -532,7 +586,7 @@ static void hid_internal_get_usb_info(struct hid_device_info* dev, DEVINST dev_n
 		}
 
 		/* Get the device id of the USB device. */
-		free(device_id);
+		api_allocators.free_fn(device_id);
 		device_id = (wchar_t *)hid_internal_get_devnode_property(usb_dev_node, &DEVPKEY_Device_InstanceId, DEVPROP_TYPE_STRING);
 		if (!device_id)
 			goto end;
@@ -548,7 +602,7 @@ static void hid_internal_get_usb_info(struct hid_device_info* dev, DEVINST dev_n
 				break;
 
 			if (*ptr == L'\\') {
-				free(dev->serial_number);
+				api_allocators.free_fn(dev->serial_number);
 				dev->serial_number = _wcsdup(ptr + 1);
 				break;
 			}
@@ -560,8 +614,8 @@ static void hid_internal_get_usb_info(struct hid_device_info* dev, DEVINST dev_n
 		dev->interface_number = 0;
 
 end:
-	free(device_id);
-	free(hardware_ids);
+	api_allocators.free_fn(device_id);
+	api_allocators.free_fn(hardware_ids);
 }
 
 /* HidD_GetProductString/HidD_GetManufacturerString/HidD_GetSerialNumberString is not working for BLE HID devices
@@ -574,7 +628,7 @@ static void hid_internal_get_ble_info(struct hid_device_info* dev, DEVINST dev_n
 		/* Manufacturer Name String (UUID: 0x2A29) */
 		wchar_t* manufacturer_string = (wchar_t *)hid_internal_get_devnode_property(dev_node, (const DEVPROPKEY*)&PKEY_DeviceInterface_Bluetooth_Manufacturer, DEVPROP_TYPE_STRING);
 		if (manufacturer_string) {
-			free(dev->manufacturer_string);
+			api_allocators.free_fn(dev->manufacturer_string);
 			dev->manufacturer_string = manufacturer_string;
 		}
 	}
@@ -583,7 +637,7 @@ static void hid_internal_get_ble_info(struct hid_device_info* dev, DEVINST dev_n
 		/* Serial Number String (UUID: 0x2A25) */
 		wchar_t* serial_number = (wchar_t *)hid_internal_get_devnode_property(dev_node, (const DEVPROPKEY*)&PKEY_DeviceInterface_Bluetooth_DeviceAddress, DEVPROP_TYPE_STRING);
 		if (serial_number) {
-			free(dev->serial_number);
+			api_allocators.free_fn(dev->serial_number);
 			dev->serial_number = serial_number;
 		}
 	}
@@ -601,7 +655,7 @@ static void hid_internal_get_ble_info(struct hid_device_info* dev, DEVINST dev_n
 		}
 
 		if (product_string) {
-			free(dev->product_string);
+			api_allocators.free_fn(dev->product_string);
 			dev->product_string = product_string;
 		}
 	}
@@ -689,8 +743,8 @@ static hid_internal_detect_bus_type_result hid_internal_detect_bus_type(const wc
 	result.dev_node = dev_node;
 
 end:
-	free(device_id);
-	free(compatible_ids);
+	api_allocators.free_fn(device_id);
+	api_allocators.free_fn(compatible_ids);
 	return result;
 }
 
@@ -699,7 +753,7 @@ static char *hid_internal_UTF16toUTF8(const wchar_t *src)
 	char *dst = NULL;
 	int len = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, src, -1, NULL, 0, NULL, NULL);
 	if (len) {
-		dst = (char*)calloc(len, sizeof(char));
+		dst = (char*)api_allocators.calloc_fn(len, sizeof(char));
 		if (dst == NULL) {
 			return NULL;
 		}
@@ -714,7 +768,7 @@ static wchar_t *hid_internal_UTF8toUTF16(const char *src)
 	wchar_t *dst = NULL;
 	int len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, src, -1, NULL, 0);
 	if (len) {
-		dst = (wchar_t*)calloc(len, sizeof(wchar_t));
+		dst = (wchar_t*)api_allocators.calloc_fn(len, sizeof(wchar_t));
 		if (dst == NULL) {
 			return NULL;
 		}
@@ -736,7 +790,7 @@ static struct hid_device_info *hid_internal_get_device_info(const wchar_t *path,
 	hid_internal_detect_bus_type_result detect_bus_type_result;
 
 	/* Create the record. */
-	dev = (struct hid_device_info*)calloc(1, sizeof(struct hid_device_info));
+	dev = (struct hid_device_info*)api_allocators.calloc_fn(1, sizeof(struct hid_device_info));
 
 	if (dev == NULL) {
 		return NULL;
@@ -841,10 +895,10 @@ struct hid_device_info HID_API_EXPORT * HID_API_CALL hid_enumerate(unsigned shor
 		}
 
 		if (device_interface_list != NULL) {
-			free(device_interface_list);
+			api_allocators.free_fn(device_interface_list);
 		}
 
-		device_interface_list = (wchar_t*)calloc(len, sizeof(wchar_t));
+		device_interface_list = (wchar_t*)api_allocators.calloc_fn(len, sizeof(wchar_t));
 		if (device_interface_list == NULL) {
 			register_global_error(L"Failed to allocate memory for HID device interface list");
 			return NULL;
@@ -913,7 +967,7 @@ cont_close:
 	}
 
 end_of_function:
-	free(device_interface_list);
+	api_allocators.free_fn(device_interface_list);
 
 	return root;
 }
@@ -924,11 +978,11 @@ void  HID_API_EXPORT HID_API_CALL hid_free_enumeration(struct hid_device_info *d
 	struct hid_device_info *d = devs;
 	while (d) {
 		struct hid_device_info *next = d->next;
-		free(d->path);
-		free(d->serial_number);
-		free(d->manufacturer_string);
-		free(d->product_string);
-		free(d);
+		api_allocators.free_fn(d->path);
+		api_allocators.free_fn(d->serial_number);
+		api_allocators.free_fn(d->manufacturer_string);
+		api_allocators.free_fn(d->product_string);
+		api_allocators.free_fn(d);
 		d = next;
 	}
 }
@@ -1045,11 +1099,11 @@ HID_API_EXPORT hid_device * HID_API_CALL hid_open_path(const char *path)
 	dev->output_report_length = caps.OutputReportByteLength;
 	dev->input_report_length = caps.InputReportByteLength;
 	dev->feature_report_length = caps.FeatureReportByteLength;
-	dev->read_buf = (char*) malloc(dev->input_report_length);
+	dev->read_buf = (char*) api_allocators.malloc_fn(dev->input_report_length);
 	dev->device_info = hid_internal_get_device_info(interface_path, dev->device_handle);
 
 end_of_function:
-	free(interface_path);
+	api_allocators.free_fn(interface_path);
 
 	if (device_handle != INVALID_HANDLE_VALUE) {
 		CloseHandle(device_handle);
@@ -1094,7 +1148,7 @@ int HID_API_EXPORT HID_API_CALL hid_write(hid_device *dev, const unsigned char *
 		buf = (unsigned char *) data;
 	} else {
 		if (dev->write_buf == NULL) {
-			dev->write_buf = (unsigned char *) malloc(dev->output_report_length);
+			dev->write_buf = (unsigned char *) api_allocators.malloc_fn(dev->output_report_length);
 
 			if (dev->write_buf == NULL) {
 				register_string_error(dev, L"hid_write/malloc");
@@ -1276,7 +1330,7 @@ int HID_API_EXPORT HID_API_CALL hid_send_feature_report(hid_device *dev, const u
 		length_to_send = length;
 	} else {
 		if (dev->feature_buf == NULL) {
-			dev->feature_buf = (unsigned char *) malloc(dev->feature_report_length);
+			dev->feature_buf = (unsigned char *) api_allocators.malloc_fn(dev->feature_report_length);
 
 			if (dev->feature_buf == NULL) {
 				register_string_error(dev, L"hid_send_feature_report/malloc");
@@ -1377,7 +1431,7 @@ int HID_API_EXPORT HID_API_CALL hid_send_output_report(hid_device* dev, const un
 		length_to_send = length;
 	} else {
 		if (dev->write_buf == NULL) {
-			dev->write_buf = (unsigned char *) malloc(dev->output_report_length);
+			dev->write_buf = (unsigned char *) api_allocators.malloc_fn(dev->output_report_length);
 
 			if (dev->write_buf == NULL) {
 				register_string_error(dev, L"hid_send_output_report/malloc");
@@ -1553,8 +1607,8 @@ int HID_API_EXPORT_CALL hid_winapi_get_container_id(hid_device *dev, GUID *conta
 		register_string_error(dev, L"Failed to read ContainerId property from device node");
 
 end:
-	free(interface_path);
-	free(device_id);
+	api_allocators.free_fn(interface_path);
+	api_allocators.free_fn(device_id);
 
 	return cr == CR_SUCCESS ? 0 : -1;
 }
