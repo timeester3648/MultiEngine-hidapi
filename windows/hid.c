@@ -1232,7 +1232,7 @@ int HID_API_EXPORT HID_API_CALL hid_read_timeout(hid_device *dev, unsigned char 
 				/* ReadFile() has failed.
 				   Clean up and return error. */
 				register_winapi_error_to_buffer(&dev->last_read_error_str, L"ReadFile");
-				CancelIo(dev->device_handle);
+				CancelIoEx(dev->device_handle, NULL);
 				dev->read_pending = FALSE;
 				goto end_of_function;
 			}
@@ -1465,7 +1465,7 @@ void HID_API_EXPORT HID_API_CALL hid_close(hid_device *dev)
 	if (!dev)
 		return;
 
-	CancelIo(dev->device_handle);
+	CancelIoEx(dev->device_handle, NULL);
 	free_hid_device(dev);
 }
 
