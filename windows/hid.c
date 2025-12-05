@@ -349,7 +349,7 @@ static void register_string_error_to_buffer(wchar_t **error_buffer, const WCHAR 
 	*error_buffer = NULL;
 
 	if (string_error) {
-		*error_buffer = _wcsdup(string_error);
+		*error_buffer = hidapi_wcsdup(string_error);
 	}
 }
 
@@ -603,7 +603,7 @@ static void hid_internal_get_usb_info(struct hid_device_info* dev, DEVINST dev_n
 
 			if (*ptr == L'\\') {
 				api_allocators.free_fn(dev->serial_number);
-				dev->serial_number = _wcsdup(ptr + 1);
+				dev->serial_number = hidapi_wcsdup(ptr + 1);
 				break;
 			}
 		}
@@ -832,17 +832,17 @@ static struct hid_device_info *hid_internal_get_device_info(const wchar_t *path,
 	/* Serial Number */
 	string[0] = L'\0';
 	HidD_GetSerialNumberString(handle, string, size);
-	dev->serial_number = _wcsdup(string);
+	dev->serial_number = hidapi_wcsdup(string);
 
 	/* Manufacturer String */
 	string[0] = L'\0';
 	HidD_GetManufacturerString(handle, string, size);
-	dev->manufacturer_string = _wcsdup(string);
+	dev->manufacturer_string = hidapi_wcsdup(string);
 
 	/* Product String */
 	string[0] = L'\0';
 	HidD_GetProductString(handle, string, size);
-	dev->product_string = _wcsdup(string);
+	dev->product_string = hidapi_wcsdup(string);
 
 	/* now, the portion that depends on string descriptors */
 	switch (dev->bus_type) {
