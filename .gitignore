@@ -31,6 +31,14 @@ CMakeLists.txt.user
 # doxgen output
 doxygen/html/
 
+# Visual Studio Code + CMake
+.vscode/
+build/
+
+# Visual Studio Code + CMake
+.vscode/
+build/
+
 # exclude project files
 **.sln
 **.vcxproj
